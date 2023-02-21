@@ -6,7 +6,7 @@ import 'rxjs/add/observable/throw';
 import { THEMES_CONFIG } from '../themes';
 import { Router, CanActivate, ActivatedRouteSnapshot } from '@angular/router';
 import { DOCUMENT } from '@angular/common';
-import { BehaviorSubject } from 'rxjs';
+import { BehaviorSubject, Observable } from 'rxjs';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import * as Fingerprint2 from 'fingerprintjs2';
 import {
@@ -101,10 +101,16 @@ import {
     Sort,
     FileTypeFilter,
     GetAllFilesRequest,
-    GetAllTasksResponse
+    GetAllTasksResponse,
+    DeleteNotificationRequest,
+    SetNotificationsToReadRequest,
+    GetNotificationsResponse,
+    UpdateTaskOptionsRequest,
+    User
 } from '../api-types';
 import { isoLangs } from './settings/locales_list';
 import { Title } from '@angular/platform-browser';
+import { MatDrawerMode } from '@angular/material/sidenav';
 
 @Injectable()
 export class PostsService implements CanActivate {
@@ -114,7 +120,7 @@ export class PostsService implements CanActivate {
     THEMES_CONFIG = THEMES_CONFIG;
     theme;
     card_size = 'medium';
-    sidepanel_mode = 'over';
+    sidepanel_mode: MatDrawerMode = 'over';
 
     // auth
     auth_token = '4241b401-7236-493e-92b5-b72696b9d853';
@@ -130,7 +136,7 @@ export class PostsService implements CanActivate {
     // must be reset after logout
     isLoggedIn = false;
     token = null;
-    user = null;
+    user: User = null;
     permissions = null;
 
     available_permissions = null;
@@ -210,8 +216,8 @@ export class PostsService implements CanActivate {
             if (yes_reload) { this.reloadConfig(); }
         });
 
-        if (localStorage.getItem('sidepanel_mode')) {
-            this.sidepanel_mode = localStorage.getItem('sidepanel_mode');
+        if (localStorage.getItem('sidepanel_mode') as MatDrawerMode) {
+            this.sidepanel_mode = localStorage.getItem('sidepanel_mode') as MatDrawerMode;
         }
 
         if (localStorage.getItem('card_size')) {
@@ -230,6 +236,18 @@ export class PostsService implements CanActivate {
 
     }
     canActivate(route: ActivatedRouteSnapshot, state): Promise<boolean> {
+        if (this.initialized) {
+            return this._canActivate(route);
+        } else {
+            this.service_initialized.subscribe(init => {
+                if (init) {
+                    return this._canActivate(route);
+                }
+            });
+        }
+    }
+
+    _canActivate(route: ActivatedRouteSnapshot): Promise<boolean> {
         const PATH_TO_REQUIRED_PERM = {
             settings: 'settings',
             subscriptions: 'subscriptions',
@@ -272,10 +290,9 @@ export class PostsService implements CanActivate {
     }
 
     // tslint:disable-next-line: max-line-length
-    // tslint:disable-next-line: max-line-length
     downloadFile(url: string, type: FileType, selectedQuality: string, customQualityConfiguration: string, customArgs: string = null, additionalArgs: string = null, customOutput: string = null, youtubeUsername: string = null, youtubePassword: string = null, cropFileSettings: CropFileSettings = null) {
         const body: DownloadRequest = {url: url,
-            selectedHeight: selectedQuality,
+            maxHeight: selectedQuality,
             customQualityConfiguration: customQualityConfiguration,
             customArgs: customArgs,
             additionalArgs: additionalArgs,
@@ -289,7 +306,7 @@ export class PostsService implements CanActivate {
 
     generateArgs(url: string, type: FileType, selectedQuality: string, customQualityConfiguration: string, customArgs: string = null, additionalArgs: string = null, customOutput: string = null, youtubeUsername: string = null, youtubePassword: string = null, cropFileSettings = null) {
         const body: DownloadRequest = {url: url,
-            selectedHeight: selectedQuality,
+            maxHeight: selectedQuality,
             customQualityConfiguration: customQualityConfiguration,
             customArgs: customArgs,
             additionalArgs: additionalArgs,
@@ -362,8 +379,8 @@ export class PostsService implements CanActivate {
         return this.http.post<GetFileResponse>(this.path + 'getFile', body, this.httpOptions);
     }
 
-    getAllFiles(sort: Sort = null, range: number[] = null, text_search: string = null, file_type_filter: FileTypeFilter = FileTypeFilter.BOTH, sub_id: string = null) {
-        const body: GetAllFilesRequest = {sort: sort, range: range, text_search: text_search, file_type_filter: file_type_filter, sub_id: sub_id};
+    getAllFiles(sort: Sort = null, range: number[] = null, text_search: string = null, file_type_filter: FileTypeFilter = FileTypeFilter.BOTH, favorite_filter = false, sub_id: string = null) {
+        const body: GetAllFilesRequest = {sort: sort, range: range, text_search: text_search, file_type_filter: file_type_filter, favorite_filter: favorite_filter, sub_id: sub_id};
         return this.http.post<GetAllFilesResponse>(this.path + 'getAllFiles', body, this.httpOptions);
     }
 
@@ -418,8 +435,8 @@ export class PostsService implements CanActivate {
         return this.http.post<SuccessObject>(this.path + 'uploadCookies', fileFormData, this.httpOptions);
     }
 
-    downloadArchive(sub) {
-        const body: DownloadArchiveRequest = {sub: sub};
+    downloadArchive(type: FileType, sub_id: string) {
+        const body: DownloadArchiveRequest = {type: type, sub_id: sub_id};
         return this.http.post(this.path + 'downloadArchive', body, {responseType: 'blob', params: this.httpOptions.params});
     }
 
@@ -536,9 +553,8 @@ export class PostsService implements CanActivate {
         return this.http.post<UnsubscribeResponse>(this.path + 'unsubscribe', body, this.httpOptions)
     }
 
-    deleteSubscriptionFile(sub: SubscriptionRequestData, file: string, deleteForever: boolean, file_uid: string) {
-        const body: DeleteSubscriptionFileRequest = {sub: sub, file: file, deleteForever: deleteForever,
-            file_uid: file_uid};
+    deleteSubscriptionFile(file_uid: string, deleteForever: boolean) {
+        const body: DeleteSubscriptionFileRequest = {file_uid: file_uid, deleteForever: deleteForever};
         return this.http.post<SuccessObject>(this.path + 'deleteSubscriptionFile', body, this.httpOptions)
     }
 
@@ -630,6 +646,11 @@ export class PostsService implements CanActivate {
     updateTaskData(task_key: string, data: any) {
         const body: UpdateTaskDataRequest = {task_key: task_key, new_data: data};
         return this.http.post<SuccessObject>(this.path + 'updateTaskData', body, this.httpOptions);
+    }
+
+    updateTaskOptions(task_key: string, options: any) {
+        const body: UpdateTaskOptionsRequest = {task_key: task_key, new_options: options};
+        return this.http.post<SuccessObject>(this.path + 'updateTaskOptions', body, this.httpOptions);
     }
 
     getDBBackups() {
@@ -808,7 +829,7 @@ export class PostsService implements CanActivate {
         return this.http.post(this.path + 'auth/changePassword', {user_uid: user_uid, new_password: new_password}, this.httpOptions);
     }
 
-    getUsers() {
+    getUsers(): Observable<GetUsersResponse> {
         return this.http.post<GetUsersResponse>(this.path + 'getUsers', {}, this.httpOptions);
     }
 
@@ -833,7 +854,31 @@ export class PostsService implements CanActivate {
         return this.http.get(sponsor_block_api_path + `skipSegments/${id_hash}`);
     }
 
-    public openSnackBar(message: string, action: string = '') {
+    // notifications
+
+    getNotifications(): Observable<GetNotificationsResponse> {
+        return this.http.post<GetNotificationsResponse>(this.path + 'getNotifications', {},
+                                                                    this.httpOptions);
+    }
+
+    setNotificationsToRead(uids: string[]): Observable<SuccessObject> {
+        const body: SetNotificationsToReadRequest = {uids: uids};
+        return this.http.post<SuccessObject>(this.path + 'setNotificationsToRead', body,
+                                                                    this.httpOptions);
+    }
+
+    deleteNotification(uid: string): Observable<SuccessObject> {
+        const body: DeleteNotificationRequest = {uid: uid};
+        return this.http.post<SuccessObject>(this.path + 'deleteNotification', body,
+                                                                    this.httpOptions);
+    }
+    
+    deleteAllNotifications(): Observable<SuccessObject> {
+        return this.http.post<SuccessObject>(this.path + 'deleteAllNotifications', {},
+                                                                    this.httpOptions);
+    }
+
+    public openSnackBar(message: string, action = ''): void {
         this.snackBar.open(message, action, {
           duration: 2000,
         });

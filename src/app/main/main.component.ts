@@ -1,7 +1,7 @@
 import { Component, OnInit, ElementRef, ViewChild, ViewChildren, QueryList } from '@angular/core';
 import {PostsService} from '../posts.services';
 import { Observable, Subject } from 'rxjs';
-import {FormControl, Validators} from '@angular/forms';
+import {UntypedFormControl, Validators} from '@angular/forms';
 import { MatDialog } from '@angular/material/dialog';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { saveAs } from 'file-saver';
@@ -49,7 +49,7 @@ export class MainComponent implements OnInit {
   fileManagerEnabled = false;
   allowQualitySelect = false;
   downloadOnlyMode = false;
-  allowAutoplay = false;
+  forceAutoplay = false;
   use_youtubedl_archive = false;
   globalCustomArgs = null;
   allowAdvancedDownload = false;
@@ -73,15 +73,10 @@ export class MainComponent implements OnInit {
   download_uids: string[] = [];
   current_download: Download = null;
 
-  urlForm = new FormControl('', [Validators.required]);
+  urlForm = new UntypedFormControl('', [Validators.required]);
 
   qualityOptions = {
     'video': [
-      {
-        'resolution': null,
-        'value': '',
-        'label': 'Max'
-      },
       {
         'resolution': '3840x2160',
         'value': '2160',
@@ -124,50 +119,47 @@ export class MainComponent implements OnInit {
       }
     ],
     'audio': [
-      {
-        'kbitrate': null,
-        'value': '',
-        'label': 'Max'
-      },
-      {
-        'kbitrate': '256',
-        'value': '256K',
-        'label': '256 Kbps'
-      },
-      {
-        'kbitrate': '160',
-        'value': '160K',
-        'label': '160 Kbps'
-      },
-      {
-        'kbitrate': '128',
-        'value': '128K',
-        'label': '128 Kbps'
-      },
-      {
-        'kbitrate': '96',
-        'value': '96K',
-        'label': '96 Kbps'
-      },
-      {
-        'kbitrate': '70',
-        'value': '70K',
-        'label': '70 Kbps'
-      },
-      {
-        'kbitrate': '50',
-        'value': '50K',
-        'label': '50 Kbps'
-      },
-      {
-        'kbitrate': '32',
-        'value': '32K',
-        'label': '32 Kbps'
-      }
+      // TODO: implement
+      // {
+      //   'kbitrate': '256',
+      //   'value': '256K',
+      //   'label': '256 Kbps'
+      // },
+      // {
+      //   'kbitrate': '160',
+      //   'value': '160K',
+      //   'label': '160 Kbps'
+      // },
+      // {
+      //   'kbitrate': '128',
+      //   'value': '128K',
+      //   'label': '128 Kbps'
+      // },
+      // {
+      //   'kbitrate': '96',
+      //   'value': '96K',
+      //   'label': '96 Kbps'
+      // },
+      // {
+      //   'kbitrate': '70',
+      //   'value': '70K',
+      //   'label': '70 Kbps'
+      // },
+      // {
+      //   'kbitrate': '50',
+      //   'value': '50K',
+      //   'label': '50 Kbps'
+      // },
+      // {
+      //   'kbitrate': '32',
+      //   'value': '32K',
+      //   'label': '32 Kbps'
+      // }
     ]
   }
 
-  selectedQuality = '';
+  selectedMaxQuality = '';
+  selectedQuality: string | unknown = '';
   formats_loading = false;
 
   @ViewChild('urlinput', { read: ElementRef }) urlInput: ElementRef;
@@ -195,7 +187,7 @@ export class MainComponent implements OnInit {
     this.fileManagerEnabled = this.postsService.config['Extra']['file_manager_enabled']
                               && this.postsService.hasPermission('filemanager');
     this.downloadOnlyMode = this.postsService.config['Extra']['download_only_mode'];
-    this.allowAutoplay = this.postsService.config['Extra']['allow_autoplay'];
+    this.forceAutoplay = this.postsService.config['Extra']['force_autoplay'];
     this.use_youtubedl_archive = this.postsService.config['Downloader']['use_youtubedl_archive'];
     this.globalCustomArgs = this.postsService.config['Downloader']['custom_args'];
     this.youtubeSearchEnabled = this.postsService.config['API'] && this.postsService.config['API']['use_youtube_API'] &&
@@ -237,6 +229,8 @@ export class MainComponent implements OnInit {
       if (customArgs && customArgs !== 'null') { this.customArgs = customArgs }
       if (customOutput && customOutput !== 'null') { this.customOutput = customOutput }
       if (youtubeUsername && youtubeUsername !== 'null') { this.youtubeUsername = youtubeUsername }
+
+      this.getSimulatedOutput();
     }
 
     // get downloads routine
@@ -274,7 +268,8 @@ export class MainComponent implements OnInit {
       this.audioOnly = localStorage.getItem('audioOnly') === 'true';
     }
 
-    if (localStorage.getItem('autoplay') !== null) {
+    this.autoplay = this.forceAutoplay;
+    if (!this.forceAutoplay && localStorage.getItem('autoplay') !== null) {
       this.autoplay = localStorage.getItem('autoplay') === 'true';
     }
 
@@ -376,7 +371,7 @@ export class MainComponent implements OnInit {
     const urls = this.getURLArray(this.url);
     for (let i = 0; i < urls.length; i++) {
       const url = urls[i];
-      this.postsService.downloadFile(url, type as FileType, (selected_quality === '' ? null : selected_quality),
+      this.postsService.downloadFile(url, type as FileType, (customQualityConfiguration || selected_quality === '' || typeof selected_quality !== 'string' ? null : selected_quality),
         customQualityConfiguration, customArgs, additionalArgs, customOutput, youtubeUsername, youtubePassword, cropFileSettings).subscribe(res => {
           this.current_download = res['download'];
           this.downloads.push(res['download']);
@@ -408,7 +403,7 @@ export class MainComponent implements OnInit {
   }
 
   getSelectedAudioFormat(): string {
-    if (this.selectedQuality === '') { return null; }
+    if (typeof this.selectedQuality === 'string') { return null; }
     const cachedFormatsExists = this.cachedAvailableFormats[this.url] && this.cachedAvailableFormats[this.url]['formats'];
     if (cachedFormatsExists) {
       return this.selectedQuality['format_id'];
@@ -418,7 +413,7 @@ export class MainComponent implements OnInit {
   }
 
   getSelectedVideoFormat(): string {
-    if (this.selectedQuality === '') { return null; }
+    if (typeof this.selectedQuality === 'string') { return null; }
     const cachedFormats = this.cachedAvailableFormats[this.url] && this.cachedAvailableFormats[this.url]['formats'];
     if (cachedFormats) {
       if (this.selectedQuality) {
@@ -494,6 +489,7 @@ export class MainComponent implements OnInit {
   }
 
   inputChanged(new_val: string): void {
+    this.selectedQuality = '';
     if (new_val === '' || !new_val) {
       this.results_showing = false;
     } else {
@@ -535,12 +531,15 @@ export class MainComponent implements OnInit {
   }
 
   getURLInfo(url: string): void {
-    // if url is a youtube playlist, skip getting url info
-    if (url.includes('playlist')) {
-      return;
-    }
     if (!this.cachedAvailableFormats[url]) {
       this.cachedAvailableFormats[url] = {};
+    }
+    // if url is a youtube playlist, skip getting url info
+    if (url.includes('playlist')) {
+      // make it think that formats errored so that users have options
+      this.cachedAvailableFormats[url]['formats_loading'] = false;
+      this.cachedAvailableFormats[url]['formats_failed'] = true;
+      return;
     }
     if (!(this.cachedAvailableFormats[url] && this.cachedAvailableFormats[url]['formats'])) {
       this.cachedAvailableFormats[url]['formats_loading'] = true;
@@ -582,7 +581,7 @@ export class MainComponent implements OnInit {
       }
     }
 
-    this.postsService.generateArgs(this.url, type as FileType, (this.selectedQuality === '' ? null : this.selectedQuality),
+    this.postsService.generateArgs(this.url, type as FileType, (customQualityConfiguration || this.selectedQuality === '' || typeof this.selectedQuality !== 'string' ? null : this.selectedQuality),
       customQualityConfiguration, customArgs, additionalArgs, customOutput, youtubeUsername, youtubePassword, cropFileSettings).subscribe(res => {
         const simulated_args = res['args'];
         if (simulated_args) {
@@ -599,6 +598,7 @@ export class MainComponent implements OnInit {
 
   errorFormats(url: string): void {
     this.cachedAvailableFormats[url]['formats_loading'] = false;
+    this.cachedAvailableFormats[url]['formats_failed'] = true;
     console.error('Could not load formats for url ' + url);
   }
 

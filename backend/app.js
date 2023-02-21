@@ -18,6 +18,7 @@ const URL = require('url').URL;
 const CONSTS = require('./consts')
 const read_last_lines = require('read-last-lines');
 const ps = require('ps-node');
+const Feed = require('feed').Feed;
 
 // needed if bin/details somehow gets deleted
 if (!fs.existsSync(CONSTS.DETAILS_BIN_PATH)) fs.writeJSONSync(CONSTS.DETAILS_BIN_PATH, {"version":"2000.06.06","path":"node_modules\\youtube-dl\\bin\\youtube-dl.exe","exec":"youtube-dl.exe","downloader":"youtube-dl"})
@@ -32,6 +33,7 @@ const subscriptions_api = require('./subscriptions');
 const categories_api = require('./categories');
 const twitch_api = require('./twitch');
 const youtubedl_api = require('./youtube-dl');
+const archive_api = require('./archive');
 
 var app = express();
 
@@ -69,7 +71,8 @@ db.defaults(
         downloads: {},
         subscriptions: [],
         files_to_db_migration_complete: false,
-        tasks_manager_role_migration_complete: false
+        tasks_manager_role_migration_complete: false,
+        archives_migration_complete: false
 }).write();
 
 users_db.defaults(
@@ -197,6 +200,15 @@ async function checkMigrations() {
         if (success) logger.info('Task manager permissions check complete!');
         else logger.error('Failed to auto add tasks manager permissions to admin role!');
         db.set('tasks_manager_role_migration_complete', true).write();
+    }
+
+    const archives_migration_complete = db.get('archives_migration_complete').value();
+    if (!archives_migration_complete) {
+        logger.info('Checking if archives have been migrated...');
+        const imported_archives = await archive_api.importArchives();
+        if (imported_archives) logger.info('Archives migration complete!');
+        else logger.error('Failed to migrate archives!');
+        db.set('archives_migration_complete', true).write();
     }
 
     return true;
@@ -510,9 +522,6 @@ async function loadConfig() {
     db_api.database_initialized = true;
     db_api.database_initialized_bs.next(true);
 
-    // creates archive path if missing
-    await fs.ensureDir(utils.getArchiveFolder());
-
     // check migrations
     await checkMigrations();
 
@@ -700,7 +709,7 @@ app.use(function(req, res, next) {
         next();
     } else if (req.query.apiKey && config_api.getConfigItem('ytdl_use_api_key') && req.query.apiKey === config_api.getConfigItem('ytdl_api_key')) {
         next();
-    } else if (req.path.includes('/api/stream/') || req.path.includes('/api/thumbnail/')) {
+    } else if (req.path.includes('/api/stream/') || req.path.includes('/api/thumbnail/') || req.path.includes('/api/rss')) {
         next();
     } else {
         logger.verbose(`Rejecting request - invalid API use for endpoint: ${req.path}. API key received: ${req.query.apiKey}`);
@@ -773,7 +782,7 @@ app.post('/api/restartServer', optionalJwt, (req, res) => {
 
 app.get('/api/getDBInfo', optionalJwt, async (req, res) => {
     const db_info = await db_api.getDBStats();
-    res.send({db_info: db_info});
+    res.send(db_info);
 });
 
 app.post('/api/transferDB', optionalJwt, async (req, res) => {
@@ -813,11 +822,13 @@ app.post('/api/downloadFile', optionalJwt, async function(req, res) {
         additionalArgs: req.body.additionalArgs,
         customOutput: req.body.customOutput,
         selectedHeight: req.body.selectedHeight,
+        maxHeight: req.body.maxHeight,
         customQualityConfiguration: req.body.customQualityConfiguration,
         youtubeUsername: req.body.youtubeUsername,
         youtubePassword: req.body.youtubePassword,
         ui_uid: req.body.ui_uid,
-        cropFileSettings: req.body.cropFileSettings
+        cropFileSettings: req.body.cropFileSettings,
+        ignoreArchive: req.body.ignoreArchive
     };
 
     const download = await downloader_api.createDownload(url, type, options, user_uid);
@@ -843,6 +854,7 @@ app.post('/api/generateArgs', optionalJwt, async function(req, res) {
         additionalArgs: req.body.additionalArgs,
         customOutput: req.body.customOutput,
         selectedHeight: req.body.selectedHeight,
+        maxHeight: req.body.maxHeight,
         customQualityConfiguration: req.body.customQualityConfiguration,
         youtubeUsername: req.body.youtubeUsername,
         youtubePassword: req.body.youtubePassword,
@@ -921,35 +933,15 @@ app.post('/api/getFile', optionalJwt, async function (req, res) {
 
 app.post('/api/getAllFiles', optionalJwt, async function (req, res) {
     // these are returned
-    let files = null;
     const sort = req.body.sort;
     const range = req.body.range;
     const text_search = req.body.text_search;
     const file_type_filter = req.body.file_type_filter;
+    const favorite_filter = req.body.favorite_filter;
     const sub_id = req.body.sub_id;
     const uuid = req.isAuthenticated() ? req.user.uid : null;
 
-    const filter_obj = {user_uid: uuid};
-    const regex = true;
-    if (text_search) {
-        if (regex) {
-            filter_obj['title'] = {$regex: `.*${text_search}.*`, $options: 'i'};
-        } else {
-            filter_obj['$text'] = { $search: utils.createEdgeNGrams(text_search) };
-        }
-    }
-
-    if (sub_id) {
-        filter_obj['sub_id'] = sub_id;
-    }
-
-    if (file_type_filter === 'audio_only') filter_obj['isAudio'] = true;
-    else if (file_type_filter === 'video_only') filter_obj['isAudio'] = false;
-    
-    files = await db_api.getRecords('files', filter_obj, false, sort, range, text_search);
-    const file_count = await db_api.getRecords('files', filter_obj, true);
-
-    files = JSON.parse(JSON.stringify(files));
+    const {files, file_count} = await db_api.getAllFiles(sort, range, text_search, file_type_filter, favorite_filter, sub_id, uuid);
 
     res.send({
         files: files,
@@ -1092,9 +1084,6 @@ app.post('/api/disableSharing', optionalJwt, async function(req, res) {
             await db_api.updateRecord('files', {uid: uid}, {sharingEnabled: false})
         } else if (is_playlist) {
             await db_api.updateRecord(`playlists`, {id: uid}, {sharingEnabled: false});
-        } else if (type === 'subscription') {
-            // TODO: Implement. Main blocker right now is subscription videos are not stored in the DB, they are searched for every
-            //          time they are requested from the subscription directory.
         } else {
             // error
             success = false;
@@ -1109,7 +1098,7 @@ app.post('/api/disableSharing', optionalJwt, async function(req, res) {
     });
 });
 
-app.post('/api/incrementViewCount', optionalJwt, async (req, res) => {
+app.post('/api/incrementViewCount', async (req, res) => {
     let file_uid = req.body.file_uid;
     let sub_id = req.body.sub_id;
     let uuid = req.body.uuid;
@@ -1244,12 +1233,9 @@ app.post('/api/unsubscribe', optionalJwt, async (req, res) => {
 
 app.post('/api/deleteSubscriptionFile', optionalJwt, async (req, res) => {
     let deleteForever = req.body.deleteForever;
-    let file = req.body.file;
     let file_uid = req.body.file_uid;
-    let sub = req.body.sub;
-    let user_uid = req.isAuthenticated() ? req.user.uid : null;
 
-    let success = await subscriptions_api.deleteSubscriptionFile(sub, file, deleteForever, file_uid, user_uid);
+    let success = await db_api.deleteFile(file_uid, deleteForever);
 
     if (success) {
         res.send({
@@ -1430,10 +1416,9 @@ app.post('/api/deletePlaylist', optionalJwt, async (req, res) => {
 app.post('/api/deleteFile', optionalJwt, async (req, res) => {
     const uid = req.body.uid;
     const blacklistMode = req.body.blacklistMode;
-    const uuid = req.isAuthenticated() ? req.user.uid : null;
 
     let wasDeleted = false;
-    wasDeleted = await db_api.deleteFile(uid, uuid, blacklistMode);
+    wasDeleted = await db_api.deleteFile(uid, blacklistMode);
     res.send(wasDeleted);
 });
 
@@ -1465,7 +1450,7 @@ app.post('/api/deleteAllFiles', optionalJwt, async (req, res) => {
 
     for (let i = 0; i < files.length; i++) {    
         let wasDeleted = false;
-        wasDeleted = await db_api.deleteFile(files[i].uid, uuid, blacklistMode);
+        wasDeleted = await db_api.deleteFile(files[i].uid, blacklistMode);
         if (wasDeleted) {
             delete_count++;
         }
@@ -1527,15 +1512,18 @@ app.post('/api/downloadFileFromServer', optionalJwt, async (req, res) => {
 });
 
 app.post('/api/downloadArchive', optionalJwt, async (req, res) => {
-    let sub = req.body.sub;
-    let archive_dir = sub.archive;
+    const uuid = req.isAuthenticated() ? req.user.uid : null;
+    const sub_id = req.body.sub_id; 
+    const type = req.body.type;
 
-    let full_archive_path = path.join(archive_dir, 'archive.txt');
+    const archive_text = await archive_api.generateArchive(type, uuid, sub_id);
 
-    if (await fs.pathExists(full_archive_path)) {
-        res.sendFile(full_archive_path);
+    if (archive_text !== null && archive_text !== undefined) {
+        res.setHeader('Content-type', "application/octet-stream");
+        res.setHeader('Content-disposition', 'attachment; filename=archive.txt');
+        res.send(archive_text);
     } else {
-        res.sendStatus(404);
+        res.sendStatus(400);
     }
 
 });
@@ -1809,6 +1797,15 @@ app.post('/api/updateTaskData', optionalJwt, async (req, res) => {
     res.send({success: success});
 });
 
+app.post('/api/updateTaskOptions', optionalJwt, async (req, res) => {
+    const task_key = req.body.task_key;
+    const new_options = req.body.new_options;
+  
+    const success = await db_api.updateRecord('tasks', {key: task_key}, {options: new_options});
+
+    res.send({success: success});
+});
+
 app.post('/api/getDBBackups', optionalJwt, async (req, res) => {
     const backup_dir = path.join('appdata', 'db_backup');
     fs.ensureDirSync(backup_dir);
@@ -1991,6 +1988,93 @@ app.post('/api/changeRolePermissions', optionalJwt, async (req, res) => {
 
     res.send({success: success});
 });
+
+// notifications
+
+app.post('/api/getNotifications', optionalJwt, async (req, res) => {
+    const uuid = req.user.uid;
+
+    const notifications = await db_api.getRecords('notifications', {user_uid: uuid});
+
+    res.send({notifications: notifications});
+});
+
+// set notifications to read
+app.post('/api/setNotificationsToRead', optionalJwt, async (req, res) => {
+    const uuid = req.user.uid;
+
+    const success = await db_api.updateRecords('notifications', {user_uid: uuid}, {read: true});
+
+    res.send({success: success});
+});
+
+app.post('/api/deleteNotification', optionalJwt, async (req, res) => {
+    const uid = req.body.uid;
+
+    const success = await db_api.removeRecord('notifications', {uid: uid});
+
+    res.send({success: success});
+});
+
+app.post('/api/deleteAllNotifications', optionalJwt, async (req, res) => {
+    const uuid = req.user.uid;
+
+    const success = await db_api.removeAllRecords('notifications', {user_uid: uuid});
+
+    res.send({success: success});
+});
+
+// rss feed
+
+app.get('/api/rss', async function (req, res) {
+    if (!config_api.getConfigItem('ytdl_enable_rss_feed')) {
+        logger.error('RSS feed is disabled! It must be enabled in the settings before it can be generated.');
+        res.sendStatus(403);
+        return;
+    }
+
+    // these are returned
+    const sort = req.query.sort ? JSON.parse(decodeURIComponent(req.query.sort)) : {by: 'registered', order: -1};
+    const range = req.query.range ? req.query.range.map(range_num => parseInt(range_num)) : null;
+    const text_search = req.query.text_search ? decodeURIComponent(req.query.text_search) : null;
+    const file_type_filter = req.query.file_type_filter;
+    const favorite_filter = req.query.favorite_filter === 'true';
+    const sub_id = req.query.sub_id ? decodeURIComponent(req.query.sub_id) : null;
+    const uuid = req.query.uuid ? decodeURIComponent(req.query.uuid) : null;
+
+    const {files} = await db_api.getAllFiles(sort, range, text_search, file_type_filter, favorite_filter, sub_id, uuid);
+
+    const feed = new Feed({
+            title: 'Downloads',
+            description: 'YoutubeDL-Material downloads',
+            id: utils.getBaseURL(),
+            link: utils.getBaseURL(),
+            image: 'https://github.com/Tzahi12345/YoutubeDL-Material/blob/master/src/assets/images/logo_128px.png',
+            favicon: 'https://raw.githubusercontent.com/Tzahi12345/YoutubeDL-Material/master/src/favicon.ico',
+            generator: 'YoutubeDL-Material'
+    });
+
+    files.forEach(file => {
+        feed.addItem({
+            title: file.title,
+            link: `${utils.getBaseURL()}/#/player;uid=${file.uid}`,
+            description: file.description,
+            author: [
+                {
+                    name: file.uploader,
+                    link: file.url
+                }
+            ],
+            contributor: [],
+            date: file.timestamp,
+            // https://stackoverflow.com/a/45415677/8088021
+            image: file.thumbnailURL.replace('&', '&amp;')
+        });
+      });
+    res.send(feed.rss2());
+});
+
+// web server
 
 app.use(function(req, res, next) {
     //if the request is not html then move along
